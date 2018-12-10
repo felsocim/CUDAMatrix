@@ -96,6 +96,21 @@ __global__ void MatrixProductKernel_v0(void)
   T_real res = 0.0;
 
   // Matrix product computation
+  for (int i = 0; i < SIZE; i++) {
+    res += GPU_A[lig][i] * GPU_B[i][col];
+  }
+
+  GPU_C[lig][col] = res;
+}
+
+__global__ void MatrixProductKernel_v1(void)
+{
+  // Index computations
+  int lig = blockIdx.y;
+  int col = threadIdx.x + blockIdx.x * BLOCK_SIZE_X_K0;
+  T_real res = 0.0;
+
+  // Matrix product computation
   if(col < SIZE) {
    for (int i = 0; i < SIZE; i++) {
      res += GPU_A[lig][i] * GPU_B[i][col];
@@ -105,7 +120,7 @@ __global__ void MatrixProductKernel_v0(void)
   }
 }
 
-__global__ void MatrixProductKernel_v1(void)
+__global__ void MatrixProductKernel_v2(void)
 {
   // Index computations
   int lig = threadIdx.y + blockIdx.y * BLOCK_SIZE_Y_K1;
@@ -133,11 +148,10 @@ void gpuProduct(gkid_t kid)
  switch(kid) {
 
  case GK0 : // Kernel v0 - using only global memory (with coalescent data accesses)
-   // - init the grid of blocs
    Db.x = BLOCK_SIZE_X_K0;
    Db.y = 1;
    Db.z = 1;
-   Dg.x = !(SIZE % BLOCK_SIZE_X_K0) ? SIZE / BLOCK_SIZE_X_K0 : SIZE / BLOCK_SIZE_X_K0 + 1;
+   Dg.x = SIZE / BLOCK_SIZE_X_K0;
    Dg.y = SIZE;
    Dg.z = 1;
    // - run the Grid of Blocs of threads
@@ -146,6 +160,18 @@ void gpuProduct(gkid_t kid)
 
  case GK1 :
    // - init the grid of blocs
+   Db.x = BLOCK_SIZE_X_K0;
+   Db.y = 1;
+   Db.z = 1;
+   Dg.x = !(SIZE % BLOCK_SIZE_X_K0) ? SIZE / BLOCK_SIZE_X_K0 : SIZE / BLOCK_SIZE_X_K0 + 1;
+   Dg.y = SIZE;
+   Dg.z = 1;
+   // - run the Grid of Blocs of threads
+   MatrixProductKernel_v1<<<Dg,Db>>>();
+      break;
+
+ case GK2 :
+// - init the grid of blocs
    Db.x = BLOCK_SIZE_X_K1;
    Db.y = BLOCK_SIZE_Y_K1;
    Db.z = 1;
@@ -153,10 +179,7 @@ void gpuProduct(gkid_t kid)
    Dg.y = !(SIZE % BLOCK_SIZE_Y_K1) ? SIZE / BLOCK_SIZE_Y_K1 : SIZE / BLOCK_SIZE_Y_K1 + 1;
    Dg.z = 1;
    // - run the Grid of Blocs of threads
-   MatrixProductKernel_v1<<<Dg,Db>>>();
-   break;
-
- case GK2 :
+   MatrixProductKernel_v2<<<Dg,Db>>>();
   break;
 
  case GK3 :
