@@ -160,6 +160,39 @@ __global__ void MatrixProductKernel_v3(void)
   GPU_C[lig][col] = res;
 }
 
+__global__ void MatrixProductKernel_v4(void)
+{
+  int lig = threadIdx.y + blockIdx.y * BLOCK_SIZE_XY_K3;
+  int col = threadIdx.x + blockIdx.x * BLOCK_SIZE_XY_K3;
+  __shared__ T_real data_A[BLOCK_SIZE_XY_K3][BLOCK_SIZE_XY_K3];
+  __shared__ T_real data_B[BLOCK_SIZE_XY_K3][BLOCK_SIZE_XY_K3];
+  T_real res = .0;
+  int limit = (SIZE % BLOCK_SIZE_XY_K3) ? SIZE / BLOCK_SIZE_XY_K3 + 1 : SIZE / BLOCK_SIZE_XY_K3;
+
+  for (int e = 0; e < limit; e++) {
+    if (lig < SIZE && e * BLOCK_SIZE_XY_K3 + threadIdx.x < SIZE) 
+      data_A[threadIdx.y][threadIdx.x] = GPU_A[lig][e * BLOCK_SIZE_XY_K3 + threadIdx.x];
+    else
+      data_A[threadIdx.y][threadIdx.x] = .0; 
+   
+    if (col < SIZE && e * BLOCK_SIZE_XY_K3 + threadIdx.y < SIZE) 
+      data_B[threadIdx.y][threadIdx.x] = GPU_B[e * BLOCK_SIZE_XY_K3 + threadIdx.y][col];
+    else
+      data_B[threadIdx.y][threadIdx.x] = .0;
+      
+    __syncthreads();
+    if (lig < SIZE && col < SIZE)
+      for (int i = 0; i < BLOCK_SIZE_XY_K3; i++) 
+        res += data_A[threadIdx.y][i] * data_B[i][threadIdx.x];
+        
+    __syncthreads();
+  }
+  
+  if (lig < SIZE && col < SIZE)
+    GPU_C[lig][col] = res;
+}
+
+
 
 /*-------------------------------------------------------------------------------*/
 /* Small matrix product on the local GPU.                                        */
@@ -218,6 +251,16 @@ void gpuProduct(gkid_t kid)
    break;
 
  case GK4 :
+// - init the grid of blocs
+   Db.x = BLOCK_SIZE_XY_K3;
+   Db.y = BLOCK_SIZE_XY_K3;
+   Db.z = 1;
+   Dg.x = !(SIZE % BLOCK_SIZE_XY_K3) ? SIZE / BLOCK_SIZE_XY_K3 : SIZE / BLOCK_SIZE_XY_K3 + 1;
+   Dg.y = !(SIZE % BLOCK_SIZE_XY_K3) ? SIZE / BLOCK_SIZE_XY_K3 : SIZE / BLOCK_SIZE_XY_K3 + 1;
+   Dg.z = 1;
+   // - run the Grid of Blocs of threads
+   MatrixProductKernel_v4<<<Dg,Db>>>();
+
   break;
 
  case GK5 :
