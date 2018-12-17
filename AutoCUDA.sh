@@ -27,7 +27,7 @@ then
 fi
 
 # Execute tests for configuration: K1 with 1D blocks
-i=32
+i=8
 
 printf "K1 with 1D blocks,,,\n"
 while test $i -le 1024;
@@ -43,7 +43,7 @@ do
 
   for j in $(seq 1 10);
   do
-    ./MatrixProduct -c GPU -gpu-k 1 > current.out
+    $EXEC -c GPU -gpu-k 1 > current.out
     get_results $i 1
   done
 
@@ -56,11 +56,10 @@ printf "K2 with 2D blocks,,,\n" >> results.csv
 printf "X-size,Y-size,Time,Gflops\n" >> results.csv
 
 # Execute tests for configuration: K2 with 2D blocks
-i=4
-j=1024
-j_init=1024
+i=2
+j_init=512
 
-while test $i -le 512;
+while test $i -le 1024;
 do
   if test $i -eq 1024;
   then
@@ -71,20 +70,23 @@ do
 
   while test $j -ge 2;
   do
-    export BS="BLOCK_SIZE_X_K1=$i -DBLOCK_SIZE_Y_K1=$j"
-    make
-
-    if test $? -ne 0;
+    if test $i -ge 8 || test $j -ge 8;
     then
-      echo "Compilation failure (K2, block size X: $i, block size Y: $j)! Exiting."
-      exit 2
-    fi
+      export BS="BLOCK_SIZE_X_K1=$i -DBLOCK_SIZE_Y_K1=$j"
+      make
 
-    for k in $(seq 1 10);
-    do
-      ./MatrixProduct -c GPU -gpu-k 2 > current.out
-      get_results $i $j
-    done
+      if test $? -ne 0;
+      then
+        echo "Compilation failure (K2, block size X: $i, block size Y: $j)! Exiting."
+        exit 2
+      fi
+
+      for k in $(seq 1 10);
+      do
+        $EXEC -c GPU -gpu-k 2 > current.out
+        get_results $i $j
+      done
+    fi
 
     j=$(expr $j \/ 2)
   done
