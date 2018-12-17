@@ -6,7 +6,7 @@
 CXX=g++-6
 GPUCXX=nvcc --compiler-bindir /usr/bin/$(CXX)
 
-CXXFLAGS = -O3 #-DDP 
+CXXFLAGS = -O3 -D$(BS)  #-DDP 
 CXXFLAGS += -DKERNELBLAS
 CXXFLAGS += -I/opt/cuda/include/  #-I/usr/local/cuda/include
 CC_CXXFLAGS = -Wall -fopenmp
