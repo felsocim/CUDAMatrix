@@ -1,0 +1,399 @@
+\documentclass[11pt, twocolumn]{article}
+\usepackage[top=1cm, bottom=2cm, left=1cm, right=1cm]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{amsmath, amssymb, textcomp, listings, color, graphicx, tikz, pgfplots, collcell, xstring, multirow}
+
+\setlength{\parindent}{2em}
+
+\pgfplotsset{width=7cm,compat=1.8}
+
+\usetikzlibrary{shapes.misc} 
+\tikzset{cross/.style={cross out, draw=black, 
+    minimum size=2*(#1-\pgflinewidth), 
+    inner sep=0pt, outer sep=0pt},
+    cross/.default={2.2pt}
+}
+
+\definecolor{egreen}{RGB}{63,127,95}
+\definecolor{epurple}{RGB}{127,0,85}
+
+\lstset{
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    commentstyle=\color{egreen},
+    keywordstyle=\color{epurple}\bfseries
+}
+
+\renewcommand{\lstlistingname}{\textsc{Listage}}
+
+\title{TP2 de programmation CUDA \\ \Large{(utilisation des registres et du cache générique et optimisation par \textit{shared memory})}}
+\author{Par Marek \textsc{Felsoci} et Aurélien \textsc{Rausch}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section*{Introduction}
+
+Le but de ce travail pratique était d'étendre un programme de multiplication de matrices carrées, en utilisant la technologie \textsc{cuda}, de façon à ce que les calculs soient effectués par le processeur de la carte graphique (GPU) plutôt que par le processeur central (CPU). Notre implémentation comprend plusieurs noyaux de calcul dont nous avons étudié les performances pour différentes dimensions de blocs de threads \textsc{cuda}.
+
+\par Pour nos expérimentations, nous avons considéré deux matrices de taille $4096 \times 4096$ composées de nombres à virgule flottante. Ce document rend compte des résultats obtenus au cours d'une série de mesures de performances pratiquées sur un ordinateur de la salle J4 (\texttt{pcj411}) disposant d'une carte graphique \textit{nVidia} GeForce GTX 680.
+
+\section{Méthode d'expérimentation}
+\label{section:methode_experimentation}
+
+Trois noyaux de calcul ont été expérimentés et mesurés avec, pour chacun d'eux, des dimensions de grille différentes. Nous cherchons ici à mesurer le temps d'exécution (en secondes) ainsi que le nombre d'opérations à virgule flottante (flops) nécessaires à la multiplication de matrices.
+
+\par À partir des résultats de l'exécution utilisant uniquement le processeur central (CPU) de l'ordinateur nous avons pu déterminer un speed-up pour chaque exécution du calcul effectué à l'aide de la carte graphique.
+
+\par Aussi, et pour nous assurer de la cohérence des données récoltées, chaque expérimentation a été répétée une dizaine de fois à l'aide d'un script \textsc{bash} afin de pouvoir établir, pour chaque résultat, une valeur minimale, maximale, moyenne et médiane.
+
+\par Voici la liste des noyaux de calcul que nous avons expérimentés :
+
+\begin{itemize}
+    \item \textbf{Noyau K1} : découpage en blocs de threads à \textbf{\textsc{une}} dimension ; utilisation des \textbf{registres} et du \textbf{cache générique} uniquement
+    \item \textbf{Noyau K2} : découpage en blocs de threads à \textbf{\textsc{deux}} dimensions ; utilisation des \textbf{registres} et du \textbf{cache générique} uniquement
+    \item \textbf{Noyau K4} : découpage en blocs de threads à \textbf{\textsc{deux}} dimensions ; optimisation en utilisant la \textbf{mémoire partagée}
+\end{itemize}
+
+\section{Détails de l'implémentation}
+
+La première étape de l'extension du programme initial consistait en l'implémentation des fonctions assurant le transfert des données des matrices opérandes vers des symboles GPU (voir le listage \ref{listage:CpuToGpu}) puis la récupération des données du résultat de calcul depuis les symboles GPU (voir le listage \ref{listage:GpuToCpu}). La macro \texttt{SIZE} indique la taille des dimensions des matrices, soit 4096 dans le cas de nos expérimentations. 
+
+\begin{lstlisting}[language=C, label={listage:CpuToGpu}, caption={Fonction de transfert de données vers GPU}]
+void gpuSetDataOnGPU(void) {
+  // Set GPU_A symbol
+  CHECK_CUDA_SUCCESS(cudaMemcpyToSymbol(
+     GPU_A, &A[0][0],
+     (SIZE * SIZE) * sizeof(T_real),
+     0, cudaMemcpyHostToDevice
+   ), "Transfer A --> GPU_A");
+
+  // Set GPU_B symbol
+  CHECK_CUDA_SUCCESS(cudaMemcpyToSymbol(
+     GPU_B, &B[0][0],
+     (SIZE * SIZE) * sizeof(T_real),
+     0, cudaMemcpyHostToDevice
+   ), "Transfer B --> GPU_B");
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=C, label={listage:GpuToCpu}, caption={Fonction de transfert de données depuis GPU}]
+void gpuGetResultOnCPU(void) {
+  // Get GPU_C symbol
+  CHECK_CUDA_SUCCESS(cudaMemcpyFromSymbol(
+      &C[0][0], GPU_C,
+      (SIZE * SIZE) * sizeof(T_real),
+      0, cudaMemcpyDeviceToHost
+    ), "Transfer GPU_C --> C");
+}
+\end{lstlisting}
+
+Dans un second temps, nous avons procédé à l'implémentation de différents noyaux de calcul rappelés dans la section \ref{section:methode_experimentation}.
+
+\subsection{Noyau K1}
+
+Dans notre premier noyau de calcul, nous utilisons des blocs de threads \textsc{cuda} à une dimension pour calculer les portions de la matrice résultat. Ce choix se traduit par la configuration des dimensions de la grille de calcul présente dans le listage \ref{listage:K1config} et par l'implémentation dans le listage \ref{listage:K1code}.
+
+\begin{lstlisting}[language=C, morekeywords={dim3}, label={listage:K1config}, caption={Configuration des dimensions de la grille de calcul pour \textit{K1}}]
+...
+dim3 Dg, Db;
+...
+// Configuration des dimensions de la grille
+Db.x = BLOCK_SIZE_X_K0; 
+Db.y = 1; Db.z = 1;
+Dg.x = !(SIZE % BLOCK_SIZE_X_K0) ? SIZE / BLOCK_SIZE_X_K0 : SIZE / BLOCK_SIZE_X_K0 + 1;
+Dg.y = SIZE; Dg.z = 1;
+// Appel de la fonction de calcul (version 1 du noyau)
+MatrixProductKernel_v1<<<Dg,Db>>>();
+\end{lstlisting}
+
+\begin{lstlisting}[language=C, morekeywords={__global__}, label={listage:K1code}, caption={Implémentation du noyau \textit{K1}}]
+__global__ void MatrixProductKernel_v1(void) {
+  // Index computations
+  int lig = blockIdx.y; T_real res = 0.0;
+  int col = threadIdx.x + blockIdx.x * BLOCK_SIZE_X_K0;
+  // Matrix product computation
+  if(col < SIZE) {
+   for (int i = 0; i < SIZE; i++) {
+     res += GPU_A[lig][i] * GPU_B[i][col];
+   }
+   GPU_C[lig][col] = res;
+  }
+}
+\end{lstlisting}
+
+En fait, le nombre de threads par bloc correspond à la taille du bloc. Le nombre de blocs par grille est égal au nombre de blocs nécessaires pour couvrir l'intégralité de la matrice résultat. Si la taille de cette dernière n'est pas divisible par la taille du bloc, il faut compter un bloc supplémentaire pour traiter les cases de matrices restantes.
+
+\par Par ailleurs, comme nous avons entrepris d'effectuer le pavage de la matrice résultat avec des bloc de threads à une dimension, les dimensions $y$ et $z$ de la grille sont égales à $1$.
+
+\subsection{Noyau K2}
+
+Le deuxième noyau utilise des blocs de threads à 2 dimensions pour effectuer le calcul. La configuration dimensionnelle de la grille correspondante se trouve dans le listage \ref{listage:K2config} et l'implémentation dans le listage \ref{listage:K2code}. 
+
+\begin{lstlisting}[language=C, morekeywords={dim3}, label={listage:K2config}, caption={Configuration des dimensions de la grille de calcul pour \textit{K2}}]
+...
+dim3 Dg, Db;
+...
+// Configuration des dimensions de la grille
+Db.x = BLOCK_SIZE_X_K1;
+Db.y = BLOCK_SIZE_Y_K1;
+Db.z = 1;
+Dg.x = !(SIZE % BLOCK_SIZE_X_K1) ? SIZE / BLOCK_SIZE_X_K1 : SIZE / BLOCK_SIZE_X_K1 + 1;
+Dg.y = !(SIZE % BLOCK_SIZE_Y_K1) ? SIZE / BLOCK_SIZE_Y_K1 : SIZE / BLOCK_SIZE_Y_K1 + 1;
+Dg.z = 1;
+// Appel de la fonction de calcul (version 1 du noyau)
+MatrixProductKernel_v2<<<Dg,Db>>>();
+\end{lstlisting}
+
+\begin{lstlisting}[language=C, morekeywords={__global__}, label={listage:K2code}, caption={Implémentation du noyau \textit{K2}}]
+__global__ void MatrixProductKernel_v2(void) {
+  // Index computations
+  int lig = threadIdx.y + blockIdx.y * BLOCK_SIZE_Y_K1;
+  int col = threadIdx.x + blockIdx.x * BLOCK_SIZE_X_K1;
+  T_real res = 0.0;
+  // Matrix product computation
+  if(col < SIZE && lig < SIZE) {
+   for (int i = 0; i < SIZE; i++) {
+     res += GPU_A[lig][i] * GPU_B[i][col];
+   }
+   GPU_C[lig][col] = res;
+  }
+}
+\end{lstlisting}
+
+Cette fois-ci, le nombre de threads par bloc en dimension $y$ devient supérieur à 1. De même pour le nombre de blocs par grille. Ainsi le programme effectuera un pavage de la matrice résultat en 2D dimensions.
+
+\subsection{Noyau K4}
+
+En dernier, nous avons tenté d'optimiser le calcul en nous servant de la mémoire partagée pour cacher les valeurs qui sont utilisées plusieurs fois durant le calcul et ainsi éviter leur chargement répétitif depuis les registres et le cache général. Dans ce cas, la configuration des dimensions de la grille de calcul ne change guère par rapport à celle de \textit{K2} (voir le listage \ref{listage:K2config}). Par contre, l'implémentation de cette version du noyau devient nettement plus complexe (voir le listage \ref{listage:K4code}).
+
+\begin{lstlisting}[language=C, morekeywords={__global__, __shared__}, label={listage:K4code}, caption={Implémentation du noyau \textit{K4}}]
+__global__ void MatrixProductKernel_v4(void) {
+  int lig = threadIdx.y + blockIdx.y * BLOCK_SIZE_XY_K3;
+  int col = threadIdx.x + blockIdx.x * BLOCK_SIZE_XY_K3;
+  __shared__ T_real data_A[BLOCK_SIZE_XY_K3][BLOCK_SIZE_XY_K3];
+  __shared__ T_real data_B[BLOCK_SIZE_XY_K3][BLOCK_SIZE_XY_K3];
+  T_real res = .0;
+  int limit = (SIZE % BLOCK_SIZE_XY_K3) ? SIZE / BLOCK_SIZE_XY_K3 + 1 : SIZE / BLOCK_SIZE_XY_K3;
+
+  for (int e = 0; e < limit; e++) {
+    if (lig < SIZE && e * BLOCK_SIZE_XY_K3 + threadIdx.x < SIZE) 
+      data_A[threadIdx.y][threadIdx.x] = GPU_A[lig][e * BLOCK_SIZE_XY_K3 + threadIdx.x];
+    else
+      data_A[threadIdx.y][threadIdx.x] = .0; 
+    if (col < SIZE && e * BLOCK_SIZE_XY_K3 + threadIdx.y < SIZE) 
+      data_B[threadIdx.y][threadIdx.x] = GPU_B[e * BLOCK_SIZE_XY_K3 + threadIdx.y][col];
+    else
+      data_B[threadIdx.y][threadIdx.x] = .0;
+      
+    __syncthreads();
+    if (lig < SIZE && col < SIZE)
+      for (int i = 0; i < BLOCK_SIZE_XY_K3; i++) 
+        res += data_A[threadIdx.y][i] * data_B[i][threadIdx.x];
+    __syncthreads();
+  }
+  if (lig < SIZE && col < SIZE)
+    GPU_C[lig][col] = res;
+}
+\end{lstlisting}
+
+Dans cette version, nous créons deux tableaux partagés qui contiendront les portions des matrices opérandes nécessaires pour calculer le produit partiel. Comme ces portions sont réutilisées plusieurs fois durant le calcul il convient de les cacher dans la mémoire partagée et y accélérer ainsi l'accès depuis les threads afin d'améliorer les performances du programme.
+
+\par Avant de commencer le calcul, chaque thread remplit la portion des tableaux partagés qui lui correspond. Finalement, et après la synchronisation, les threads peuvent effectuer le calcul. Cette séquence est répétée autant fois qu'il y a de blocs dans la grille de calcul.  
+
+\section{Analyse des résultats}
+\label{section:analyse_resultats} 
+
+\subsection{GPU versus CPU}
+
+De manière générale, en considérant tous les noyaux de calcul testés, plus la taille absolue (largeur $\times$ hauteur) de la grille de calcul augmente, plus la performance du programme croît.
+
+\par Nous pouvons bien observer ce comportement notamment en analysant les résultats des tests de performances des noyaux \textit{K1} et \textit{K4}. Cependant, dans ces deux cas, soit il s'agit d'utiliser des blocs de threads à seulement une dimension ou alors le nombre de threads par bloc et le nombre de blocs par grille sont équivalents. Alors que dans le cas du noyaux \textit{K2}, utilisant des blocs de threads 2D, nous constatons que les meilleures performances ont été obtenues pour la configuration avec 16 threads par bloc et 64 blocs par grille. 
+
+% Je n'ai pas d'explication pour ça pour le moment !
+
+\subsection{Comparaison des noyaux}
+
+En comparant les figures \ref{k1graph} et \ref{k2plot}, nous pouvons voir que le noyau \textit{K2} présente de meilleures performances vis à vis du noyau \textit{K1}. En effet, puisque \textit{K2} utilise des blocs de threads à deux dimensions, plusieurs calculs peuvent être effectués en parallèle.
+
+\par Cependant le gain en performance le plus marquant offre le noyau \textit{K4} (figure \ref{k4bar}) pour lequel nous nous sommes servis de la mémoire partagée de la carte graphique pour optimiser les temps d'accès mémoire. Même en gardant une grille de dimensions plus petites ($32 \times 32$) comparée aux dimensions expérimentées pour \textit{K2}, la diminution du nombre d'accès à la mémoire globale permet d'obtenir un gain d'environ 40\% par rapport au meilleur résultat obtenu avec \textit{K2}.
+
+\begin{figure}[h]
+\begin{tikzpicture}
+                \begin{axis}[xtick pos=left,
+                             ytick pos=left,    
+                             xtick={1,2,3,4,5,6,7,8},
+                             xticklabels={8,16,32,64,128,256,512,1024},
+                             xlabel=\emph{Taille du bloc en X},
+                             ylabel=\emph{GFlops},
+                             legend style={draw=none},
+                             legend pos={north west},
+                             width=0.4\textwidth,
+                             height=0.3\textwidth]
+                \addplot[mark=*] coordinates {
+                        (1, 20.31)
+                        (2, 39.11)
+                        (3, 71) 
+                        (4, 73.16)
+                        (5, 71.49)
+                        (6, 72.09)
+                        (7, 73.70)
+                        (8, 73.96)
+                };
+        \legend{\emph{K1}}
+        \end{axis}
+        \end{tikzpicture}
+        \caption{Mesures de performance pour le noyau \textit{K1}}
+        \label{k1graph}
+\end{figure}
+
+Nous observons sur la figure \ref{k1graph} l'évolution de la
+performance du noyau de calcul \textit{K1} jusqu'à une taille de
+blocs de 32  pour se stabiliser autour de 73 GFlops. 
+Cela s'explique en partie par le fait que le nombre maximum de blocs
+résidents par multiprocesseur supportés par \textsc{cuda} est
+de 32. Au-delà de cette valeur, il n'est plus possible d'observer
+de gain important pour le noyau \textit{K1}.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+        ybar, axis on top,
+        %title={Rapport efficacite speedup},
+        %height=8cm, width=15.5cm,
+        xtick={1,2,3},
+        xticklabels={8x8,16x16,32x32},
+        bar width=0.4cm,
+        ymajorgrids, tick align=inside,
+        major grid style={draw=white},
+        %enlarge y limits={value=.1,upper},
+        %ymin=-2, ymax=35,
+        ymin=0,
+        %axis x line*=bottom,
+        axis x line*=middle,
+        axis y line=left,
+        %y axis line style={opacity=0},
+        tickwidth=0pt,
+        enlarge x limits=true,
+        legend style={
+            at={(0.5,-0.2)},
+            anchor=north,
+            legend columns=-1,
+            /tikz/every even column/.append style={column sep=0.5cm}
+        },
+       xtick=data,
+       nodes near coords={
+        \pgfmathprintnumber[precision=2]{\pgfplotspointmeta}
+       }
+    ]   
+    \addplot [draw=none, fill=blue!30] coordinates {
+      (1,99.01)
+      (2,197.21) 
+      (3,235.23)
+     };  
+     \legend{K4 (GFlops)}
+  \end{axis}
+  \end{tikzpicture}
+\caption{Mesures de performance pour le noyau \textit{K4}}
+        \label{k4bar}
+\end{figure}
+
+Comme formulé précédemment, le noyau de calcul \textit{K4}
+présente les meilleurs résultats (figure \ref{k4bar}).
+L'utilisation de mémoire
+partagée influe grandement sur la performance du noyau 
+mais est plus complexe à mettre ne oeuvre. En effet, il 
+peut être nécessaire de concevoir un algorithme de cache 
+dédié en fonction du problème (calculs) et des données à
+traiter. De plus, la gestion d'une mémoire partagée 
+nécessite de mettre en place une synchronisation entre les 
+différents threads. Néanmoins et dans la plupart des cas,
+la mémoire partagée permet aux différents processeurs graphiques
+d'échanger entre eux des données utiles au calcul, et ce, sans
+devoir passer par la mémoire globale.
+
+%The min, mid and max values
+\newcommand*{\MinNumber}{18.2}
+\newcommand*{\MidNumber}{83.21}
+\newcommand*{\MaxNumber}{166.42}
+
+%Apply the gradient macro
+\newcommand{\ApplyGradient}[1]{
+    \IfInteger{#1}{
+        #1
+    }{
+        \ifdim #1 pt > 0 pt
+            \ifdim #1 pt > \MidNumber pt
+                \pgfmathsetmacro{\PercentColor}{max(min(100.0*(#1 - \MidNumber)/(\MaxNumber-\MidNumber),100.0),0.00)} %
+                \hspace{-0.33em}\colorbox{green!\PercentColor!yellow}{#1}
+            \else
+                \pgfmathsetmacro{\PercentColor}{max(min(100.0*(\MidNumber - #1)/(\MidNumber-\MinNumber),100.0),0.00)} %
+                \hspace{-0.33em}\colorbox{red!\PercentColor!yellow}{#1}
+            \fi
+        \else
+            \hspace{-0.33em}{}
+        \fi
+    }
+}
+
+\newcolumntype{R}{>{\collectcell\ApplyGradient}c<{\endcollectcell}}
+\setlength{\tabcolsep}{0pt}
+
+\begin{table}[!ht]
+\begin{center}
+\begin{tabular}{| c | >{\centering\arraybackslash}p{1cm} || *{9}{R} |}
+    \hline
+    & & \multicolumn{9}{c}{Taille du bloc en X} \\
+    & & 2 & 4 & 8 & 16 & 32 & 64 & 128 & 256 & 512 \\ \hline \hline
+    \multirow{9}{*}{\hspace{3mm}\rotatebox{90}{Taille du bloc en Y}\hspace{3mm}} & 2 & 0 & 0 & 38.95 & 75.98 & 103.11 & 73.44 & 117.68 & 118.45 & 117.98 \\
+    & 4 & 0 & 0 & 73.75 & 106.77 & 109.16 & 117.7 & 119.13 & 119.14 & 0 \\
+    & 8 & 34.19 & 67.94 & 88.44 & 111.02 & 118.8 & 119.16 & 119.13 & 0 & 0 \\
+    & 16 & 46.85 & 71.47 & 93.95 & 156.12 & 119.08 & 119.12 & 0 & 0 & 0 \\
+    & 32 & 44.77 & 68.11 & 106.47 & 164.29 & 118.76 & 0 & 0 & 0 & 0 \\
+    & 64 & 23.79 & 46.49 & 114.61 & 166.42 & 0 & 0 & 0 & 0 & 0 \\
+    & 128 & 19.76 & 48.49 & 128.62 & 0 & 0 & 0 & 0 & 0 & 0 \\
+    & 256 & 18.68 & 63.25 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
+    & 512 & 18.2 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
+    \hline
+\end{tabular}
+\end{center}
+\caption{Mesures de performance pour le noyau \textit{K2}}
+\label{k2plot}
+\end{table} 
+
+Le noyau de calcul \textit{K2} offre des performances variables
+selon la taille de blocs utilisée (tableau \ref{k2plot}). En effet,
+on peut observer que le gain en GFlops est catastrophique lorsque
+la taille de blocs en $X$ est inférieur à une certaine valeur.
+Pour mieux comprendre ce phénomène, il faut s'intéresser au
+fonctionnement de la mémoire, et notamment de la mémoire cache 
+dans le contexte de l'accès à celle-ci selon le principe de
+localité spatiale. Dans le cas d'un tableau où l'accès à 
+ses données est ordonné par ligne (et non par colonne), il
+convient de s'assurer que l'accès à celui-ci respecte au 
+mieux la contrainte de localité mémoire qui lui est propre.
+Ainsi, si la valeur de $X$ est trop petite, il n'y a pas
+suffisamment de données contiguës pour chaque thread qui, arrivé
+à la fin de son fragment de données rencontrera un \textit{cache-miss}.
+Il faut alors s'assurer que chaque fragment soit suffisamment long
+pour avoir une proportion plus importante de \textit{cache-hit}
+pour éviter de devoir recourir à une lecture des données dans la mémoire
+globale, plus longue que le cache \textit{L1} ou \textit{L2}.
+
+\section{Conclusion}
+\label{section:conclusion}
+En dépit de sa complexité, il semble que le noyau de 
+calcul \textit{K4} ait obtenu le meilleur gain de performance.
+Aussi, cela nous permet de constater que la gestion et la
+manière d'accéder aux données en mémoire ont un impacte sur
+les performances. En effet, l'utilisation de mémoire partagée par 
+le noyau \textit{K4} a montré des résultats significatifs 
+tout comme la façon de répartir les blocs pour le noyau \textit{K2}
+impacte sur la localité spatiale des données en mémoire.
+
+\end{document}

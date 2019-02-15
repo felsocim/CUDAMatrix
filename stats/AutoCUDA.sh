@@ -1,4 +1,6 @@
 #! /bin/bash
+# Automatic test execution and statistical data collection script for our CUDA benchmarking practical exercise
+# Developed by Marek Felsoci 
 
 get_results() {
   # Stats parsing
