@@ -1,6 +1,6 @@
 # CUDAMatrix
 
-Programme de calcul matriciel utilisant la technologie CUDA de *nVidia*.
+Programme de calcul matriciel utilisant la technologie CUDA de *nVidia*
 
 ## À propos
 
